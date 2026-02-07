@@ -1,69 +1,211 @@
 # Design Document: Hospital-Setu
 
 ## 1. High-Level Architecture
-The system utilizes a **Serverless, Event-Driven Microservices Architecture** on AWS to ensure scalability, low maintenance, and pay-per-use cost efficiency.
 
-**Core Data Flow:**
-`User (WhatsApp)` ↔ `Meta Webhook` ↔ `Amazon API Gateway` ↔ `AWS Lambda (Orchestrator)` ↔ `AWS Bedrock (Intelligence)`
+Hospital-Setu follows a Secure, Serverless, Event-Driven Microservices Architecture on AWS, optimized for:
 
+- Low latency (< 8s end-to-end)
+- High reliability
+- Strict data privacy
+- Controlled LLM grounding
+- Cost-efficient scaling
 
+### Core Data Flow
 
-## 2. Tech Stack & Infrastructure Strategy
+```
+User (WhatsApp)
+   ↓
+Meta Webhook
+   ↓
+Amazon API Gateway (WAF + Throttling)
+   ↓
+Lambda Orchestrator (Intent Router)
+   ↓
+Parallel Processing Layer
+   ├── Speech Pipeline (Transcribe)
+   ├── Vision Pipeline (Claude 3.5 Vision)
+   ├── RAG Retrieval (Bedrock KB)
+   ↓
+Response Synthesizer (Claude 3.5 Sonnet)
+   ↓
+Amazon Polly (TTS)
+   ↓
+WhatsApp Media API
+```
 
-### 2.1 Compute & Interface
-- **Frontend:** WhatsApp Business API (Managed via Meta/Twilio).
-- **API Layer:** **Amazon API Gateway** (REST API) to handle webhook verification, throttling, and routing.
-- **Compute:** **AWS Lambda** (Node.js 20.x) for stateless execution of business logic.
+## 2. Component Architecture
 
-### 2.2 AI & Logic Layer
-- **Speech Services:**
-  - **Amazon Transcribe:** Automatic Language Identification (Identify `te-IN` vs `hi-IN`) + Speech-to-Text.
-  - **Amazon Polly:** Neural Text-to-Speech (Engine: `Aditi` or `Kajal`) for lifelike vernacular audio.
-- **Reasoning Engine:** **AWS Bedrock (Claude 3.5 Sonnet)**.
-  - *Role:* Intent classification, Multi-turn reasoning, and Vision analysis.
-- **Knowledge Base (RAG):** **AWS Bedrock Knowledge Bases** (using OpenSearch Serverless vector store) connected to an **S3 Bucket** (Data Source).
+### 2.1 Interface Layer
 
-### 2.3 Data & State Management
-- **Session Store:** **Amazon DynamoDB**.
-  - *Purpose:* Stores `session_id`, `user_phone`, and `last_5_turns` of conversation to enable contextual answers (e.g., resolving "How much does **it** cost?").
-- **Asset Store:** **Amazon S3**.
-  - *Purpose:* Stores hospital PDF rulebooks (Ingestion) and temporary audio buffers (Processing).
+**WhatsApp Business API (Cloud API)**
+- Entry via QR Code / Deep Link
+- No login required
+- First interaction includes:
+  - Consent notice
+  - Usage disclaimer
+  - Guardrail information
 
-## 3. Detailed Data Flows
+### 2.2 Edge & Security Layer
 
-### 3.1 Voice Query Pipeline (The "Happy Path")
-1.  **Ingest:** WhatsApp posts a binary media object to API Gateway.
-2.  **Processing:** Lambda downloads the `.ogg` audio file to ephemeral storage (`/tmp`).
-3.  **Transcribe:** Lambda triggers `TranscribeService` -> Returns text: *"Where is the blood bank?"*
-4.  **Context Fetch:** Lambda pulls recent chat history from **DynamoDB**.
-5.  **Reasoning (RAG):**
-    - Lambda calls Bedrock Agent with Text + History.
-    - Bedrock queries Knowledge Base (Vector Search) for "Blood Bank Location".
-    - Bedrock synthesizes answer: *"Block B, Ground Floor."*
-6.  **Synthesis:** Lambda sends text to **Polly** -> Receives `.mp3` stream.
-7.  **Response:** Lambda uploads `.mp3` to WhatsApp Media Endpoint and sends the audio message to user.
+**Amazon API Gateway**
+- Request validation
+- Schema validation
+- Throttling
+- API key verification
 
-### 3.2 Knowledge Ingestion Pipeline (Admin Flow)
-1.  **Admin** uploads `Hospital_Rules_v2.pdf` to S3 Bucket.
-2.  **S3 Event Notification** triggers a helper Lambda.
-3.  **Sync:** Lambda calls `StartIngestionJob` on Bedrock Knowledge Base.
-4.  **Indexing:** Bedrock chunks the PDF, creates vector embeddings, and updates the search index automatically.
+**AWS WAF**
+- Prevents abuse
+- Blocks malicious payloads
 
-## 4. Security & Privacy Design
+**AWS Shield**
+- DDoS protection
 
-### 4.1 Data Privacy
-- **Stateless Vision:** Patient images (prescriptions) are processed in volatile memory (`RAM`) and never persisted to disk/S3.
-- **PII Redaction:** Transcribe jobs are configured with PII redaction enabled to mask names/phone numbers in logs.
+### 2.3 Orchestration Layer
 
-### 4.2 Access Control
-- **IAM Least Privilege:** The Main Lambda function has restricted permissions:
-  - `s3:GetObject` (Read Only)
-  - `bedrock:InvokeModel` (Inference Only)
-  - `dynamodb:PutItem` (Session Write)
-- **Encryption:**
-  - Data at Rest: S3 and DynamoDB encrypted via **AWS KMS**.
-  - Data in Transit: TLS 1.3 enforced on API Gateway.
+**Lambda Orchestrator (Node.js 20.x)**
 
-## 5. Scalability Considerations
-- **Concurrency:** Lambda concurrency limits set to prevent runaway costs during traffic spikes.
-- **Caching:** API Gateway Caching enabled for static assets (hospital maps/images) to reduce latency.
+Responsibilities:
+- Detect input type (Voice/Text/Image)
+- Route to appropriate pipeline
+- Fetch session memory
+- Enforce guardrails
+- Call RAG layer
+- Build final response
+
+*Provisioned Concurrency enabled for demo stability.*
+
+## 3. AI Processing Pipelines
+
+### 3.1 Voice Pipeline (Optimized for Latency)
+
+**Process Flow:**
+1. WhatsApp sends .ogg
+2. Lambda downloads to /tmp
+3. Convert to PCM (if required)
+4. Amazon Transcribe Streaming
+   - Automatic language detection (te-IN, hi-IN)
+   - PII redaction enabled
+5. Extracted text → Intent Router
+
+**Latency optimization:**
+- Streaming mode reduces wait time
+- Parallel RAG fetch while transcription completes
+
+### 3.2 Vision Pipeline (Prescription Decoder)
+
+**Process:**
+- Image passed to Claude 3.5 Sonnet (Multimodal)
+- Extract:
+  - Test Names
+  - Doctor notes
+  - Department references
+
+**Safety Step:**
+- Extracted text is echoed back for user confirmation
+- Example: "I found: CBC Test, X-Ray Chest. Is this correct?"
+
+**Security:**
+- No image persistence
+- Processed fully in-memory (RAM)
+
+### 3.3 RAG Layer (Grounded Intelligence)
+
+**Infrastructure:**
+- AWS Bedrock Knowledge Base
+- Vector Store: OpenSearch Serverless
+- Data Source: S3 Bucket (Hospital PDFs)
+
+**Grounding Rules:**
+- Model must answer ONLY using retrieved context
+- If confidence < threshold → "I cannot find that information."
+- All responses include:
+  - Source document name
+  - Page number (citation)
+
+**Hallucination Prevention Strategy:**
+System prompt enforces:
+- "Do not answer beyond retrieved content."
+- "If unknown, say I do not know."
+
+### 3.4 Session Memory Strategy
+
+**DynamoDB stores:**
+- `session_id`
+- `user_phone`
+- `rolling_summary`
+- `last_user_intent`
+- `preferred_language`
+
+**Context Handling Strategy:**
+- After 5 turns → Summarize conversation
+- Store compressed summary
+- Avoid token explosion
+
+## 4. Guardrails & Safety Design
+
+### 4.1 Medical Guardrails
+
+**If user asks:**
+- Diagnosis
+- Prognosis
+- Treatment advice
+
+**System Response:**
+"I am a navigation assistant. Please consult a doctor."
+
+*Intent classifier runs before LLM invocation.*
+
+### 4.2 Abuse Prevention
+
+**Moderation Layer:**
+- AWS Comprehend for toxicity
+- Block harmful or suspicious queries
+- Log flagged interactions (without PII)
+
+### 4.3 Consent & Privacy
+
+**First interaction:**
+- Usage disclaimer
+- Data processing notice
+- Explicit "Reply YES to continue"
+
+**Images:**
+- Never stored
+- Deleted from memory after processing
+
+**Data Retention:**
+- Session expires after 24 hours
+- Auto-delete via DynamoDB TTL
+
+## 5. Scalability & Cost Optimization
+
+### 5.1 Concurrency Control
+
+- Lambda concurrency cap
+- Rate limiting per phone number
+- Circuit breaker for Bedrock failures
+
+### 5.2 Caching Strategy
+
+**API Gateway cache for:**
+- Static hospital maps
+- Frequently asked costs
+- Reduces LLM calls by ~30%
+
+### 5.3 Estimated Cost Model (Realistic)
+
+**Per Interaction:**
+- Transcribe (~10 sec audio)
+- Claude 3.5 tokens
+- Polly Neural
+- WhatsApp API fee
+
+**Estimated:** ₹0.80 – ₹1.50 per interaction (optimized usage)
+
+## 6. Observability & Monitoring
+
+- CloudWatch Logs
+- CloudWatch Alarms
+- X-Ray tracing
+- Bedrock invocation metrics
+- Failure alert to admin email
