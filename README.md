@@ -112,10 +112,6 @@ This project follows healthcare compliance standards. Please ensure all contribu
 - Performance requirements
 - Security best practices
 
-## License
-
-[Add appropriate license information]
-
 ## Support
 
 For technical support or questions about Hospital-Setu implementation, please refer to the documentation or contact the development team.
